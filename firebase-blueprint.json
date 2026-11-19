@@ -1,0 +1,254 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authorized Airsoft workshop technician profile and email identity.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "minLength": 3,
+          "maxLength": 200
+        },
+        "displayName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "createdAt", "updatedAt"]
+    },
+    "SharedWorkspace": {
+      "title": "SharedWorkspace",
+      "description": "Dedicated Airsoft repair and customization workshop root document restricted to allowlisted verified operator emails.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "name", "createdAt", "updatedAt"]
+    },
+    "AirsoftWorkshopConfig": {
+      "title": "AirsoftWorkshopConfig",
+      "description": "Airsoft service labor rate card, spare/tuning parts catalog, preferred suppliers, and workshop tax/company settings.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "partsCatalog": {
+          "type": "array",
+          "description": "Catalog of spare and upgrade airsoft parts (up to 200 items)."
+        },
+        "serviceRates": {
+          "type": "array",
+          "description": "Catalog of standard airsoft repair and tuning services (up to 100 items)."
+        },
+        "suppliers": {
+          "type": "array",
+          "description": "Preferred airsoft parts stores and suppliers (up to 30 items)."
+        },
+        "settings": {
+          "type": "object",
+          "description": "Workshop hourly labor rate, parts markup, tax modes, and company metadata."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "partsCatalog",
+        "serviceRates",
+        "suppliers",
+        "settings",
+        "updatedAt"
+      ]
+    },
+    "AirsoftWorkspaceDraft": {
+      "title": "AirsoftWorkspaceDraft",
+      "description": "Active Airsoft service ticket workbench draft and PDF estimate builder line items and diagnostic photos.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "currentTicket": {
+          "type": "object",
+          "description": "Current repair/customization ticket input, intake accessories, internal dimensions & ETU setup, fault diagnostics, chrono series telemetry, parts list, and final QA checklist."
+        },
+        "quoteItems": {
+          "type": "array",
+          "description": "Line items queued for the client PDF estimate."
+        },
+        "quoteAttachments": {
+          "type": "array",
+          "description": "Compressed diagnostic or replica photo attachments for the PDF estimate."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "currentTicket",
+        "quoteItems",
+        "quoteAttachments",
+        "updatedAt"
+      ]
+    },
+    "RepairOrderRecord": {
+      "title": "RepairOrderRecord",
+      "description": "Saved Airsoft replica repair or customization ticket with fault diagnostics, parts procurement list, process stage, and financial summary.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "workspaceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "stage": {
+          "type": "string",
+          "enum": [
+            "przyjecie",
+            "diagnostyka",
+            "oczekuje_akceptacji",
+            "zakup_czesci",
+            "w_realizacji",
+            "testy_chrono",
+            "gotowe"
+          ]
+        },
+        "paymentStatus": {
+          "type": "string",
+          "enum": ["oczekuje", "zaliczka", "oplacone", "wyslane"]
+        },
+        "documentRef": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "recordedAtIso": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "ticket": {
+          "type": "object",
+          "description": "Snapshot of replica details, intake accessories, deadline, internal dimensions & ETU settings, diagnostics checklist, chrono series readings, parts list, labor tasks, and final QA checklist."
+        },
+        "result": {
+          "type": "object",
+          "description": "Calculated parts cost, labor revenue, gross/net totals, and workshop profit."
+        },
+        "replicaLabel": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "partsSummary": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "workspaceId",
+        "ownerId",
+        "stage",
+        "paymentStatus",
+        "ticket",
+        "result",
+        "replicaLabel",
+        "partsSummary",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserProfile"
+      },
+      "description": "Allowlisted user profile document keyed by Firebase Auth UID."
+    },
+    "/workspaces/{workspaceId}": {
+      "schema": {
+        "$ref": "#/entities/SharedWorkspace"
+      },
+      "description": "Dedicated Airsoft Serwis workspace root document accessible exclusively to allowlisted verified operators."
+    },
+    "/workspaces/{workspaceId}/settings/config": {
+      "schema": {
+        "$ref": "#/entities/AirsoftWorkshopConfig"
+      },
+      "description": "Airsoft service catalog, spare parts database, suppliers, and workshop rate/tax settings."
+    },
+    "/workspaces/{workspaceId}/settings/draft": {
+      "schema": {
+        "$ref": "#/entities/AirsoftWorkspaceDraft"
+      },
+      "description": "Shared active repair ticket workbench draft and PDF estimate state."
+    },
+    "/workspaces/{workspaceId}/repairs/{repairId}": {
+      "schema": {
+        "$ref": "#/entities/RepairOrderRecord"
+      },
+      "description": "Airsoft replica repair and customization tickets with fault diagnostics and parts procurement tracking."
+    }
+  }
+}
