@@ -1,6 +1,7 @@
 export const ALLOWED_ADMIN_EMAILS = [
   'myhagenja@gmail.com',
   'inna.didenko46@gmail.com',
+  'inna.m.mukha@gmail.com',
 ] as const;
 
 export function normalizeEmail(email?: string | null): string {

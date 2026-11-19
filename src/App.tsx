@@ -816,6 +816,23 @@ export default function App() {
             settings={settings}
             knownClients={knownClients}
             onChange={updateTicketState}
+            onAddCatalogPart={(newPart) => {
+              if (partsCatalog.length >= 200) return;
+              const normalizedUrl = (newPart.productUrl || '').trim().toLowerCase();
+              const normalizedName = newPart.name.trim().toLowerCase();
+              const exists = partsCatalog.some(
+                (p) =>
+                  (normalizedUrl && (p.productUrl || '').trim().toLowerCase() === normalizedUrl) ||
+                  p.name.trim().toLowerCase() === normalizedName
+              );
+              if (exists) return;
+              handleSaveConfig(
+                [newPart, ...partsCatalog],
+                serviceRates,
+                suppliers,
+                settings
+              );
+            }}
             onClearFields={handleClearWorkbench}
             onSaveAsNew={handleSaveAsNewRepair}
             onUpdateExisting={handleUpdateExistingRepair}

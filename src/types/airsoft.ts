@@ -125,6 +125,7 @@ export interface PartsCatalogItem {
   productUrl: string;
   defaultPurchaseCost: number;
   defaultClientPrice: number;
+  stockQty?: number;
   notes?: string;
 }
 

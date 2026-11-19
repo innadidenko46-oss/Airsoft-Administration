@@ -1,7 +1,7 @@
 # Firestore Security Specification (Panel Administratora – AIRSOFT)
 
 ## 1. Data Invariants
-1. **Strict Email Allowlist + Verification Gate**: All reads and writes require `request.auth != null && request.auth.token.email_verified == true` AND `request.auth.token.email.lower() in ['myhagenja@gmail.com', 'inna.didenko46@gmail.com']`. No other email address has any access to any document.
+1. **Strict Email Allowlist + Verification Gate**: All reads and writes require `request.auth != null && request.auth.token.email_verified == true` AND `request.auth.token.email.lower() in ['myhagenja@gmail.com', 'inna.didenko46@gmail.com', 'inna.m.mukha@gmail.com']`. No other email address has any access to any document.
 2. **Dedicated Airsoft Workspace Isolation**: All Airsoft repair, diagnostics, parts procurement, and catalog documents live exclusively under `/workspaces/airsoft-serwis/...`, completely isolated from any legacy workspace (`3dlabstudio` is denied).
 3. **Immutable Identity & Timestamps**: `uid`, `ownerId`, `workspaceId`, `id`, and `createdAt` cannot be modified after creation. `createdAt` and `updatedAt` must equal `request.time`.
 4. **Closed Key Blueprints**: No shadow/ghost fields are allowed on any create or update operation (`hasAll` + `hasOnly` on create, `affectedKeys().hasOnly(...)` on update).

@@ -9,6 +9,7 @@ import {
   FilePlus2,
   ImagePlus,
   Inbox,
+  Link2,
   Loader2,
   Mail,
   Maximize2,
@@ -61,6 +62,8 @@ import {
   extractClipboardImages,
 } from '../utils/imageAttachments';
 import { InfoTooltip } from './InfoTooltip';
+import { VoiceDictationButton } from './VoiceDictationButton';
+import { parsePartFromUrl } from '../utils/partUrlParser';
 
 export interface KnownClientSuggestion {
   clientName: string;
@@ -78,6 +81,7 @@ interface RepairWorkbenchViewProps {
   settings: AirsoftWorkshopSettings;
   knownClients: KnownClientSuggestion[];
   onChange: (next: RepairTicketInput) => void;
+  onAddCatalogPart?: (part: PartsCatalogItem) => void;
   onClearFields: () => void;
   onSaveAsNew: () => void;
   onUpdateExisting: (repairId: string) => void;
@@ -132,6 +136,7 @@ export const RepairWorkbenchView: React.FC<RepairWorkbenchViewProps> = ({
   settings,
   knownClients,
   onChange,
+  onAddCatalogPart,
   onClearFields,
   onSaveAsNew,
   onUpdateExisting,
@@ -145,6 +150,15 @@ export const RepairWorkbenchView: React.FC<RepairWorkbenchViewProps> = ({
   const [emailRawText, setEmailRawText] = useState('');
   const [isParsingEmail, setIsParsingEmail] = useState(false);
   const [parseError, setParseError] = useState<string | null>(null);
+
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+
+  const [partUrlOpen, setPartUrlOpen] = useState(false);
+  const [partUrlInput, setPartUrlInput] = useState('');
+  const [savePartToWarehouse, setSavePartToWarehouse] = useState(true);
+  const [isImportingPartUrl, setIsImportingPartUrl] = useState(false);
+  const [partUrlError, setPartUrlError] = useState<string | null>(null);
+  const partUrlFetchingRef = useRef(false);
 
   const [selectedCatalogPartId, setSelectedCatalogPartId] = useState(
     partsCatalog[0]?.id || ''
@@ -286,6 +300,75 @@ export const RepairWorkbenchView: React.FC<RepairWorkbenchViewProps> = ({
       note: '',
     };
     updateField('parts', [...ticket.parts, newPart]);
+  };
+
+  const handleImportPartFromUrl = async (rawUrlOverride?: string) => {
+    const targetUrl = (rawUrlOverride ?? partUrlInput).trim();
+    if (!targetUrl || partUrlFetchingRef.current) return;
+
+    partUrlFetchingRef.current = true;
+    setIsImportingPartUrl(true);
+    setPartUrlError(null);
+
+    try {
+      const parsed = await parsePartFromUrl(targetUrl, suppliers);
+      const purchaseCost =
+        parsed.purchaseCostPln !== null ? Math.max(0, parsed.purchaseCostPln) : 0;
+      const clientPrice =
+        purchaseCost > 0
+          ? Math.round(purchaseCost * (1 + settings.defaultPartsMarkupPercent / 100))
+          : 0;
+      const catalogId =
+        savePartToWarehouse && onAddCatalogPart
+          ? `part-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`
+          : undefined;
+
+      if (catalogId && onAddCatalogPart) {
+        onAddCatalogPart({
+          id: catalogId,
+          name: parsed.name,
+          category: parsed.category,
+          supplier: parsed.supplier,
+          productUrl: parsed.productUrl,
+          defaultPurchaseCost: purchaseCost,
+          defaultClientPrice: clientPrice,
+          stockQty: 0,
+          ...(parsed.notes ? { notes: parsed.notes } : {}),
+        });
+      }
+
+      const newPart: RepairPartItem = {
+        id: `part-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+        ...(catalogId ? { catalogId } : {}),
+        name: parsed.name,
+        category: parsed.category,
+        supplier: parsed.supplier,
+        productUrl: parsed.productUrl,
+        quantity: 1,
+        purchaseUnitCost: purchaseCost,
+        clientUnitPrice: clientPrice,
+        purchaseStatus: 'do_zamowienia',
+        orderRef: '',
+        note: parsed.notes,
+      };
+      updateField('parts', [...ticket.parts, newPart]);
+      setPartUrlInput('');
+      setPartUrlOpen(false);
+      onNotify(
+        purchaseCost > 0
+          ? `Dodano z linku: ${parsed.name}`
+          : `Dodano z linku: ${parsed.name} (uzupełnij cenę zakupu)`
+      );
+    } catch (err: unknown) {
+      setPartUrlError(
+        err instanceof Error
+          ? err.message
+          : 'Nie udało się pobrać danych części z podanego linku.'
+      );
+    } finally {
+      partUrlFetchingRef.current = false;
+      setIsImportingPartUrl(false);
+    }
   };
 
   const handleUpdatePart = (id: string, patch: Partial<RepairPartItem>) => {
@@ -1107,21 +1190,54 @@ export const RepairWorkbenchView: React.FC<RepairWorkbenchViewProps> = ({
 
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <div>
-                <label className="block text-xs font-medium text-slate-700">
-                  Objawy zgłoszone przez klienta
-                </label>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5">
+                    <label className="block text-xs font-medium text-slate-700">
+                      Objawy zgłoszone przez klienta
+                    </label>
+                    <InfoTooltip text="Wpisz opis awarii lub kliknij Nagraj głosem, aby podyktować usterkę przez mikrofon." />
+                  </div>
+                  <VoiceDictationButton
+                    context="reportedFault"
+                    onTranscript={(spoken) => {
+                      setVoiceError(null);
+                      const prev = ticket.reportedFault.trim();
+                      updateField(
+                        'reportedFault',
+                        prev ? `${prev}\n${spoken}` : spoken
+                      );
+                      onNotify('Dodano głosowy opis usterki.');
+                    }}
+                    onError={(msg) => setVoiceError(msg)}
+                  />
+                </div>
                 <textarea
                   rows={3}
                   value={ticket.reportedFault}
                   onChange={(e) => updateField('reportedFault', e.target.value)}
                   placeholder="np. Silnik kręci ale tłok stoi, brak podawania na semi, spadek FPS poniżej 300..."
-                  className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-900 focus:border-[#e88a00] focus:outline-none"
+                  className="mt-1.5 w-full rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-900 focus:border-[#e88a00] focus:outline-none"
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-slate-700">
-                  Diagnoza techniczna serwisu (przyczyna usterki)
-                </label>
+                <div className="flex items-center justify-between gap-2">
+                  <label className="block text-xs font-medium text-slate-700">
+                    Diagnoza techniczna serwisu (przyczyna usterki)
+                  </label>
+                  <VoiceDictationButton
+                    context="diagnosisSummary"
+                    onTranscript={(spoken) => {
+                      setVoiceError(null);
+                      const prev = ticket.diagnosisSummary.trim();
+                      updateField(
+                        'diagnosisSummary',
+                        prev ? `${prev}\n${spoken}` : spoken
+                      );
+                      onNotify('Dodano głosową diagnozę serwisu.');
+                    }}
+                    onError={(msg) => setVoiceError(msg)}
+                  />
+                </div>
                 <textarea
                   rows={3}
                   value={ticket.diagnosisSummary}
@@ -1129,10 +1245,22 @@ export const RepairWorkbenchView: React.FC<RepairWorkbenchViewProps> = ({
                     updateField('diagnosisSummary', e.target.value)
                   }
                   placeholder="np. Zerwane pierwsze 3 zęby tłoka, nieszczelny o-ring głowicy tłoka, spalone styki spustu..."
-                  className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-900 focus:border-[#e88a00] focus:outline-none"
+                  className="mt-1.5 w-full rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-900 focus:border-[#e88a00] focus:outline-none"
                 />
               </div>
             </div>
+            {voiceError && (
+              <div className="flex items-center justify-between gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                <span>{voiceError}</span>
+                <button
+                  type="button"
+                  onClick={() => setVoiceError(null)}
+                  className="text-red-500 hover:text-red-800"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
 
             {/* 7-Subsystem Diagnostic Checklist */}
             <div>
@@ -1546,6 +1674,21 @@ export const RepairWorkbenchView: React.FC<RepairWorkbenchViewProps> = ({
               </button>
               <button
                 type="button"
+                onClick={() => {
+                  setPartUrlOpen((v) => !v);
+                  setPartUrlError(null);
+                }}
+                className={`inline-flex items-center justify-center gap-1.5 rounded-lg border px-3.5 py-2 text-xs font-medium transition-colors whitespace-nowrap ${
+                  partUrlOpen
+                    ? 'border-[#e88a00] bg-amber-50 text-amber-950 font-semibold'
+                    : 'border-stone-200 bg-white text-slate-700 hover:bg-stone-50'
+                }`}
+              >
+                <Link2 className="h-3.5 w-3.5 text-[#b86d00]" />
+                Z linku (URL)
+              </button>
+              <button
+                type="button"
                 onClick={handleAddCustomPart}
                 className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-stone-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-stone-50 whitespace-nowrap"
               >
@@ -1553,6 +1696,73 @@ export const RepairWorkbenchView: React.FC<RepairWorkbenchViewProps> = ({
                 Własna część
               </button>
             </div>
+
+            {partUrlOpen && (
+              <div className="rounded-lg border border-stone-200 bg-stone-50/70 p-3 space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-slate-800">
+                    Wklej link do części w sklepie (np. Taiwangun, Gunfire, SpecShop)
+                  </span>
+                  <label className="inline-flex items-center gap-1.5 text-[11px] font-medium text-slate-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={savePartToWarehouse}
+                      onChange={(e) => setSavePartToWarehouse(e.target.checked)}
+                      className="h-3.5 w-3.5 rounded border-stone-300 accent-[#e88a00]"
+                    />
+                    Zapisz też w magazynie części
+                  </label>
+                </div>
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                  <input
+                    type="url"
+                    value={partUrlInput}
+                    onChange={(e) => {
+                      setPartUrlInput(e.target.value);
+                      if (partUrlError) setPartUrlError(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        void handleImportPartFromUrl();
+                      }
+                    }}
+                    onPaste={(e) => {
+                      const pasted = (e.clipboardData.getData('text/plain') || '').trim();
+                      if (/^https?:\/\//i.test(pasted) && !partUrlInput.trim()) {
+                        setPartUrlInput(pasted);
+                        e.preventDefault();
+                        void handleImportPartFromUrl(pasted);
+                      }
+                    }}
+                    placeholder="https://www.taiwangun.com/..."
+                    disabled={isImportingPartUrl}
+                    className="flex-1 rounded-lg border border-stone-200 bg-white px-3 py-2 text-xs text-slate-900 focus:border-[#e88a00] focus:outline-none disabled:bg-slate-100"
+                  />
+                  <button
+                    type="button"
+                    disabled={isImportingPartUrl || !partUrlInput.trim()}
+                    onClick={() => void handleImportPartFromUrl()}
+                    className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-[#e88a00] px-4 py-2 text-xs font-semibold text-white hover:bg-[#cf7b00] disabled:opacity-50 whitespace-nowrap"
+                  >
+                    {isImportingPartUrl ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        Pobieram...
+                      </>
+                    ) : (
+                      <>
+                        <Plus className="h-3.5 w-3.5" />
+                        Pobierz i dodaj
+                      </>
+                    )}
+                  </button>
+                </div>
+                {partUrlError && (
+                  <p className="text-xs font-medium text-red-600">{partUrlError}</p>
+                )}
+              </div>
+            )}
 
             {ticket.parts.length === 0 ? (
               <p className="rounded-lg bg-stone-50 px-4 py-2.5 text-xs text-slate-500">

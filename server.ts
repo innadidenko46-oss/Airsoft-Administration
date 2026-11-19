@@ -1,6 +1,8 @@
 import 'dotenv/config';
 import express from 'express';
 import path from 'path';
+import dns from 'node:dns/promises';
+import net from 'node:net';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 
@@ -343,6 +345,459 @@ Wyciągnij WSZYSTKIE zlecenia serwisowe widoczne w materiale do tablicy "orders"
     }
     return res.status(500).json({
       error: 'Nie udało się przeanalizować materiałów do importu. Spróbuj ponownie.',
+    });
+  }
+});
+
+const ALLOWED_PART_CATEGORIES = [
+  'Pneumatyka',
+  'Gearbox / Napęd',
+  'Hop-Up / Lufa',
+  'Elektronika / Mosfet',
+  'Zewnętrzne / Body',
+  'HPA / GBB',
+  'Materiały serwisowe',
+] as const;
+
+function isPrivateOrBlockedIp(ip: string): boolean {
+  const clean = ip.replace(/^::ffff:/i, '').toLowerCase();
+  if (clean === '::1' || clean === '::' || clean.startsWith('fe80:') || clean.startsWith('fc') || clean.startsWith('fd')) {
+    return true;
+  }
+  const version = net.isIP(clean);
+  if (version === 4) {
+    const parts = clean.split('.').map(Number);
+    if (parts.length !== 4 || parts.some((n) => Number.isNaN(n))) return true;
+    const [a, b] = parts;
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;
+  }
+  return false;
+}
+
+async function assertSafePublicUrl(rawUrl: string): Promise<URL> {
+  let normalized = rawUrl.trim();
+  if (!/^https?:\/\//i.test(normalized)) {
+    normalized = `https://${normalized}`;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(normalized);
+  } catch {
+    throw new Error('INVALID_URL');
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('INVALID_URL');
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (
+    !host ||
+    host === 'localhost' ||
+    host.endsWith('.local') ||
+    host.endsWith('.internal') ||
+    host.endsWith('.localhost')
+  ) {
+    throw new Error('BLOCKED_HOST');
+  }
+  if (net.isIP(host) && isPrivateOrBlockedIp(host)) {
+    throw new Error('BLOCKED_HOST');
+  }
+  try {
+    const resolved = await dns.lookup(host, { all: true });
+    if (resolved.length === 0 || resolved.some((entry) => isPrivateOrBlockedIp(entry.address))) {
+      throw new Error('BLOCKED_HOST');
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message === 'BLOCKED_HOST') {
+      throw err;
+    }
+    throw new Error('DNS_LOOKUP_FAILED');
+  }
+  return parsed;
+}
+
+function extractHtmlSignals(html: string): {
+  title: string;
+  metaTags: string[];
+  jsonLdBlocks: string[];
+  textSnippet: string;
+  looksBlocked: boolean;
+} {
+  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const title = titleMatch ? titleMatch[1].replace(/\s+/g, ' ').trim() : '';
+
+  const metaTags: string[] = [];
+  const metaRegex = /<meta\b[^>]*>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = metaRegex.exec(html)) !== null && metaTags.length < 40) {
+    const tag = m[0];
+    if (/(title|description|price|currency|brand|amount|og:|product:)/i.test(tag)) {
+      metaTags.push(tag.replace(/\s+/g, ' ').trim());
+    }
+  }
+
+  const jsonLdBlocks: string[] = [];
+  const ldRegex = /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  while ((m = ldRegex.exec(html)) !== null && jsonLdBlocks.length < 6) {
+    const block = m[1].trim();
+    if (block && /(Product|Offer|price|name)/i.test(block)) {
+      jsonLdBlocks.push(block.slice(0, 4000));
+    }
+  }
+
+  const strippedText = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const lower = `${title} ${strippedText.slice(0, 1200)}`.toLowerCase();
+  const looksBlocked =
+    lower.includes('just a moment') ||
+    lower.includes('attention required') ||
+    lower.includes('verify you are human') ||
+    lower.includes('enable javascript and cookies') ||
+    strippedText.length < 80;
+
+  return {
+    title,
+    metaTags,
+    jsonLdBlocks,
+    textSnippet: strippedText.slice(0, 7500),
+    looksBlocked,
+  };
+}
+
+function inferSupplierFromUrl(hostname: string, suppliers: string[]): string {
+  const host = hostname.toLowerCase().replace(/^www\./, '');
+  const matched = suppliers.find((sup) => {
+    const token = sup.toLowerCase().replace(/[^a-z0-9]/g, '');
+    return token.length >= 3 && host.replace(/[^a-z0-9]/g, '').includes(token);
+  });
+  if (matched) return matched;
+  if (host.includes('taiwangun')) return 'Taiwangun';
+  if (host.includes('gunfire')) return 'Gunfire';
+  if (host.includes('specshop')) return 'SpecShop';
+  if (host.includes('azteko')) return 'Azteko';
+  if (host.includes('powair6')) return 'Powair6';
+  const primary = host.split('.')[0] || '';
+  if (!primary) return suppliers[0] || 'Inny';
+  return primary.charAt(0).toUpperCase() + primary.slice(1);
+}
+
+function normalizeCategory(raw: string): (typeof ALLOWED_PART_CATEGORIES)[number] {
+  const cleaned = (raw || '').trim().toLowerCase();
+  for (const cat of ALLOWED_PART_CATEGORIES) {
+    if (cat.toLowerCase() === cleaned) return cat;
+  }
+  if (/mosfet|etu|perun|gate|silnik|bater|kabel|styk|elektry/i.test(cleaned)) {
+    return 'Elektronika / Mosfet';
+  }
+  if (/hop|lufa|gumka|dystanser|komora/i.test(cleaned)) {
+    return 'Hop-Up / Lufa';
+  }
+  if (/pneum|tlok|tłok|cylinder|dysza|glowic|głowic|spre|sprę|oring/i.test(cleaned)) {
+    return 'Pneumatyka';
+  }
+  if (/zebat|zębat|gearbox|lozys|łożys|spust|szkielet/i.test(cleaned)) {
+    return 'Gearbox / Napęd';
+  }
+  if (/hpa|gbb|zawor|zawór|regulat|butla|gas/i.test(cleaned)) {
+    return 'HPA / GBB';
+  }
+  if (/body|kolba|chwyt|loze|łoże|magazyn|tlumik|tłumik|zewn/i.test(cleaned)) {
+    return 'Zewnętrzne / Body';
+  }
+  if (/smar|podklad|podkład|klej|loctite|mater/i.test(cleaned)) {
+    return 'Materiały serwisowe';
+  }
+  return 'Gearbox / Napęd';
+}
+
+app.post('/api/parse-part-url', async (req, res) => {
+  try {
+    const { url, suppliers } = req.body as {
+      url?: string;
+      suppliers?: string[];
+    };
+
+    if (!url || typeof url !== 'string' || !url.trim()) {
+      return res.status(400).json({
+        error: 'Wklej adres URL strony produktu przed pobraniem danych.',
+      });
+    }
+
+    let safeUrl: URL;
+    try {
+      safeUrl = await assertSafePublicUrl(url);
+    } catch (err) {
+      const code = err instanceof Error ? err.message : '';
+      if (code === 'BLOCKED_HOST') {
+        return res.status(400).json({
+          error: 'Podany adres sieci lokalnej lub wewnętrznej jest niedozwolony.',
+        });
+      }
+      if (code === 'DNS_LOOKUP_FAILED') {
+        return res.status(400).json({
+          error: 'Nie udało się odnaleźć domeny podanego sklepu. Sprawdź poprawność linku.',
+        });
+      }
+      return res.status(400).json({
+        error: 'Nieprawidłowy adres URL. Wklej pełny link zaczynający się od https://...',
+      });
+    }
+
+    const ai = getAiClient();
+    const supplierList = Array.isArray(suppliers)
+      ? suppliers.filter((s) => typeof s === 'string' && s.trim().length > 0)
+      : [];
+    const inferredSupplier = inferSupplierFromUrl(safeUrl.hostname, supplierList);
+
+    let extractedHtml: ReturnType<typeof extractHtmlSignals> | null = null;
+    try {
+      const pageResp = await fetch(safeUrl.toString(), {
+        method: 'GET',
+        redirect: 'follow',
+        signal: AbortSignal.timeout(10000),
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7',
+        },
+      });
+      if (pageResp.ok) {
+        const html = await pageResp.text();
+        const signals = extractHtmlSignals(html);
+        if (!signals.looksBlocked) {
+          extractedHtml = signals;
+        }
+      }
+    } catch {
+      extractedHtml = null;
+    }
+
+    let parsedResult: {
+      found?: boolean;
+      name?: string;
+      category?: string;
+      supplier?: string;
+      purchaseCostPln?: number | null;
+      notes?: string;
+    } | null = null;
+
+    if (extractedHtml) {
+      const prompt = `Wyciągnij dane części/produktu ASG ze strony internetowej sklepu.
+
+URL: ${safeUrl.toString()}
+Sugerowany sklep z domeny: ${inferredSupplier}
+Lista znanych sklepów warsztatu: ${supplierList.join(', ') || inferredSupplier}
+
+<title>: ${extractedHtml.title}
+Meta tags:
+${extractedHtml.metaTags.join('\n')}
+
+JSON-LD:
+${extractedHtml.jsonLdBlocks.join('\n---\n')}
+
+Tekst strony:
+${extractedHtml.textSnippet}
+
+Zasady:
+1. found = true tylko jeśli strona rzeczywiście opisuje produkt/część, w przeciwnym razie false.
+2. name = czysta, konkretna nazwa części ASG (usuń doklejone nazwy sklepu np. "- Taiwangun", "| Sklep ASG", "Cena...").
+3. category = dokładnie jedna z kategorii: ${ALLOWED_PART_CATEGORIES.join(', ')}.
+4. supplier = dopasuj do listy znanych sklepów warsztatu jeśli pasuje, albo użyj nazwy sklepu "${inferredSupplier}".
+5. purchaseCostPln = aktualna cena brutto produktu w PLN jako liczba (jeśli cena jest w EUR przelicz w przybliżeniu * 4.30 i dopisz oryginalną cenę w notes; jeśli brak ceny na stronie, wpisz null).
+6. notes = krótka wskazówka techniczna np. rozmiar/długość/gwint/twardość jeśli widoczne na stronie (max 120 znaków, albo pusty string).`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: prompt,
+        config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              found: { type: Type.BOOLEAN },
+              name: { type: Type.STRING },
+              category: { type: Type.STRING },
+              supplier: { type: Type.STRING },
+              purchaseCostPln: { type: Type.NUMBER, nullable: true },
+              notes: { type: Type.STRING },
+            },
+            required: ['found', 'name', 'category', 'supplier', 'notes'],
+          },
+        },
+      });
+      parsedResult = JSON.parse((response.text ?? '{}').trim());
+    } else {
+      const urlContextPrompt = `Odczytaj stronę produktu pod adresem ${safeUrl.toString()} i zwróć WYŁĄCZNIE poprawny obiekt JSON bez żadnego dodatkowego tekstu ani znaczników markdown:
+{
+  "found": true lub false (false jeśli nie udało się odczytać karty produktu lub strona jest zablokowana),
+  "name": "czysta nazwa części ASG bez nazwy sklepu",
+  "category": "jedna z: ${ALLOWED_PART_CATEGORIES.join(' | ')}",
+  "supplier": "${inferredSupplier}",
+  "purchaseCostPln": liczba PLN lub null jeśli brak ceny,
+  "notes": "krótka specyfikacja (np. długość/twardość/gwint) lub pusty string"
+}
+Nie zmyślaj nazwy ani ceny, jeśli nie możesz odczytać zawartości linku — ustaw "found": false.`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: urlContextPrompt,
+        config: {
+          tools: [{ urlContext: {} }],
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        },
+      });
+      const rawText = (response.text ?? '').trim();
+      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        parsedResult = JSON.parse(jsonMatch[0]);
+      }
+    }
+
+    if (!parsedResult || !parsedResult.found || !parsedResult.name?.trim()) {
+      return res.status(422).json({
+        error:
+          'Sklep zablokował automatyczny odczyt strony lub link nie prowadzi do karty produktu. Wpisz nazwę i cenę ręcznie.',
+      });
+    }
+
+    const cleanCost =
+      typeof parsedResult.purchaseCostPln === 'number' &&
+      Number.isFinite(parsedResult.purchaseCostPln) &&
+      parsedResult.purchaseCostPln > 0
+        ? Math.round(parsedResult.purchaseCostPln * 100) / 100
+        : null;
+
+    return res.json({
+      data: {
+        name: parsedResult.name.trim().slice(0, 160),
+        category: normalizeCategory(parsedResult.category || ''),
+        supplier: (parsedResult.supplier || inferredSupplier).trim() || inferredSupplier,
+        productUrl: safeUrl.toString(),
+        purchaseCostPln: cleanCost,
+        notes: (parsedResult.notes || '').trim().slice(0, 140),
+      },
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('Error in /api/parse-part-url:', message);
+
+    if (message === 'MISSING_GEMINI_API_KEY') {
+      return res.status(500).json({
+        error:
+          'Brak klucza GEMINI_API_KEY po stronie serwera. Sprawdź ustawienia w panelu Settings > Secrets.',
+      });
+    }
+    if (message.includes('429') || message.includes('RESOURCE_EXHAUSTED')) {
+      return res.status(429).json({
+        error: 'Przekroczono limit zapytań AI. Spróbuj ponownie za chwilę.',
+      });
+    }
+
+    return res.status(500).json({
+      error: 'Nie udało się pobrać danych części z podanego linku.',
+    });
+  }
+});
+
+app.post('/api/transcribe-fault', async (req, res) => {
+  try {
+    const { audioBase64, mimeType, context } = req.body as {
+      audioBase64?: string;
+      mimeType?: string;
+      context?: 'reportedFault' | 'diagnosisSummary';
+    };
+
+    if (!audioBase64 || typeof audioBase64 !== 'string' || !audioBase64.trim()) {
+      return res.status(400).json({
+        error: 'Brak danych dźwiękowych do transkrypcji.',
+      });
+    }
+
+    const baseMime =
+      typeof mimeType === 'string' && mimeType.trim()
+        ? mimeType.split(';')[0].trim().toLowerCase()
+        : 'audio/webm';
+
+    if (!baseMime.startsWith('audio/') && baseMime !== 'video/webm') {
+      return res.status(400).json({
+        error: `Nieobsługiwany format nagrania: ${baseMime}.`,
+      });
+    }
+
+    const cleanBase64 = audioBase64.replace(/^data:[^;]+;base64,/, '').trim();
+    if (cleanBase64.length > 14_000_000) {
+      return res.status(413).json({
+        error: 'Nagranie jest zbyt długie. Maksymalna długość to ok. 90 sekund.',
+      });
+    }
+
+    const ai = getAiClient();
+    const fieldLabel =
+      context === 'diagnosisSummary'
+        ? 'diagnoza techniczna technika serwisu ASG'
+        : 'objawy usterki repliki ASG zgłoszone przez klienta';
+
+    const audioPart = {
+      inlineData: {
+        mimeType: baseMime === 'video/webm' ? 'audio/webm' : baseMime,
+        data: cleanBase64,
+      },
+    };
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.5-transcribe',
+      contents: {
+        parts: [
+          audioPart,
+          {
+            text: `Dokonaj wiernej transkrypcji nagrania głosowego (${fieldLabel}) w języku polskim (lub ukraińskim, jeśli mówiący mówi po ukraińsku).
+Zachowaj poprawne nazewnictwo airsoftowe (AEG, HPA, GBB, MOSFET, ETU, Perun, Gate, Hop-Up, gumka, dystanser, dysza, zębatki, shimming, AoE, tłok, FPS, RPS, Joule, LiPo, T-Deans).
+Zwróć wyłącznie czysty, poprawnie zinterpunkcjonowany tekst wypowiedzi bez komentarzy, wstępów i dopisywania treści, których nie było w nagraniu.`,
+          },
+        ],
+      },
+    });
+
+    const transcript = (response.text ?? '').trim();
+    if (!transcript) {
+      return res.status(422).json({
+        error: 'Nie wykryto wyraźnej mowy w nagraniu. Spróbuj ponownie bliżej mikrofonu.',
+      });
+    }
+
+    return res.json({ text: transcript });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('Error in /api/transcribe-fault:', message);
+
+    if (message === 'MISSING_GEMINI_API_KEY') {
+      return res.status(500).json({
+        error:
+          'Brak klucza GEMINI_API_KEY po stronie serwera. Sprawdź ustawienia w panelu Settings > Secrets.',
+      });
+    }
+    if (message.includes('429') || message.includes('RESOURCE_EXHAUSTED')) {
+      return res.status(429).json({
+        error: 'Przekroczono limit zapytań transkrypcji AI. Spróbuj ponownie za chwilę.',
+      });
+    }
+
+    return res.status(500).json({
+      error: 'Nie udało się zamienić nagrania głosowego na tekst. Spróbuj ponownie.',
     });
   }
 });

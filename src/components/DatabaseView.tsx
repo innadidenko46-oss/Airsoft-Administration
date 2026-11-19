@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Plus, Trash2, X } from 'lucide-react';
+import React, { useRef, useState } from 'react';
+import { ExternalLink, Link2, Loader2, Plus, Trash2, X } from 'lucide-react';
 import {
   AirsoftWorkshopSettings,
   IncomeTaxMode,
@@ -8,6 +8,7 @@ import {
   ServiceRateItem,
 } from '../types/airsoft';
 import { formatPln } from '../utils/airsoftCalculations';
+import { parsePartFromUrl } from '../utils/partUrlParser';
 import { InfoTooltip } from './InfoTooltip';
 
 interface DatabaseViewProps {
@@ -50,6 +51,8 @@ export const DatabaseView: React.FC<DatabaseViewProps> = ({
     productUrl: string;
     defaultPurchaseCost: number;
     defaultClientPrice: number;
+    stockQty: number;
+    notes: string;
   }>({
     name: '',
     category: 'Pneumatyka',
@@ -57,7 +60,15 @@ export const DatabaseView: React.FC<DatabaseViewProps> = ({
     productUrl: '',
     defaultPurchaseCost: 50,
     defaultClientPrice: 60,
+    stockQty: 1,
+    notes: '',
   });
+
+  const [partUrlInput, setPartUrlInput] = useState('');
+  const [isImportingUrl, setIsImportingUrl] = useState(false);
+  const [urlImportError, setUrlImportError] = useState<string | null>(null);
+  const [urlImportNotice, setUrlImportNotice] = useState<string | null>(null);
+  const urlFetchingRef = useRef(false);
 
   const [newService, setNewService] = useState({
     name: '',
@@ -69,15 +80,87 @@ export const DatabaseView: React.FC<DatabaseViewProps> = ({
 
   const [newSupplierName, setNewSupplierName] = useState('');
 
+  const supplierOptions =
+    suppliers.length > 0 ? suppliers : ['Taiwangun', 'Gunfire', 'SpecShop', 'Inny'];
+
   const handleUpdatePart = (id: string, patch: Partial<PartsCatalogItem>) => {
     onSavePartsCatalog(
       partsCatalog.map((item) => (item.id === id ? { ...item, ...patch } : item))
     );
   };
 
+  const handleImportPartFromUrl = async (rawUrlOverride?: string) => {
+    const targetUrl = (rawUrlOverride ?? partUrlInput).trim();
+    if (!targetUrl || urlFetchingRef.current) return;
+
+    if (partsCatalog.length >= 200) {
+      setUrlImportError(
+        'Osiągnięto limit 200 pozycji w magazynie części. Usuń starszą pozycję przed dodaniem nowej.'
+      );
+      return;
+    }
+
+    urlFetchingRef.current = true;
+    setIsImportingUrl(true);
+    setUrlImportError(null);
+    setUrlImportNotice(null);
+
+    try {
+      const parsed = await parsePartFromUrl(targetUrl, supplierOptions);
+      if (parsed.purchaseCostPln !== null) {
+        const purchaseCost = Math.max(0, parsed.purchaseCostPln);
+        const clientPrice = Math.round(
+          purchaseCost * (1 + settings.defaultPartsMarkupPercent / 100)
+        );
+        const item: PartsCatalogItem = {
+          id: `part-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+          name: parsed.name,
+          category: parsed.category,
+          supplier: parsed.supplier,
+          productUrl: parsed.productUrl,
+          defaultPurchaseCost: purchaseCost,
+          defaultClientPrice: clientPrice,
+          stockQty: 1,
+          ...(parsed.notes ? { notes: parsed.notes } : {}),
+        };
+        onSavePartsCatalog([item, ...partsCatalog]);
+        setPartUrlInput('');
+        onNotify(`Dodano do magazynu z linku: ${item.name}`);
+      } else {
+        const fallbackCost = 0;
+        setNewPart({
+          name: parsed.name,
+          category: parsed.category,
+          supplier: parsed.supplier,
+          productUrl: parsed.productUrl,
+          defaultPurchaseCost: fallbackCost,
+          defaultClientPrice: fallbackCost,
+          stockQty: 1,
+          notes: parsed.notes,
+        });
+        setUrlImportNotice(
+          `Pobrano nazwę „${parsed.name}”, ale sklep nie ujawnił ceny. Wpisz koszt zakupu poniżej i kliknij Dodaj.`
+        );
+      }
+    } catch (err: unknown) {
+      setUrlImportError(
+        err instanceof Error
+          ? err.message
+          : 'Nie udało się pobrać danych produktu z linku.'
+      );
+    } finally {
+      urlFetchingRef.current = false;
+      setIsImportingUrl(false);
+    }
+  };
+
   const handleAddPart = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newPart.name.trim()) return;
+    if (partsCatalog.length >= 200) {
+      onNotify('Osiągnięto maksymalny limit 200 pozycji w magazynie.');
+      return;
+    }
     const item: PartsCatalogItem = {
       id: `part-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
       name: newPart.name.trim(),
@@ -86,8 +169,10 @@ export const DatabaseView: React.FC<DatabaseViewProps> = ({
       productUrl: newPart.productUrl.trim(),
       defaultPurchaseCost: Math.max(0, newPart.defaultPurchaseCost || 0),
       defaultClientPrice: Math.max(0, newPart.defaultClientPrice || 0),
+      stockQty: Math.max(0, Math.round(newPart.stockQty || 0)),
+      ...(newPart.notes.trim() ? { notes: newPart.notes.trim() } : {}),
     };
-    onSavePartsCatalog([...partsCatalog, item]);
+    onSavePartsCatalog([item, ...partsCatalog]);
     setNewPart({
       name: '',
       category: 'Pneumatyka',
@@ -95,8 +180,11 @@ export const DatabaseView: React.FC<DatabaseViewProps> = ({
       productUrl: '',
       defaultPurchaseCost: 50,
       defaultClientPrice: 60,
+      stockQty: 1,
+      notes: '',
     });
-    onNotify(`Dodano część do katalogu: ${item.name}`);
+    setUrlImportNotice(null);
+    onNotify(`Dodano część do magazynu: ${item.name}`);
   };
 
   const handleUpdateService = (id: string, patch: Partial<ServiceRateItem>) => {
@@ -145,18 +233,82 @@ export const DatabaseView: React.FC<DatabaseViewProps> = ({
     onSaveSuppliers(suppliers.filter((s) => s !== name));
   };
 
-  const supplierOptions = suppliers.length > 0 ? suppliers : ['Taiwangun', 'Gunfire', 'SpecShop', 'Inny'];
-
   return (
     <div className="space-y-4 sm:space-y-6">
-      {/* Section 1: Parts Catalog */}
+      {/* Section 1: Warehouse & Parts Catalog */}
       <section className="rounded-xl border border-slate-200 bg-white p-4 sm:p-5">
-        <div className="flex items-center gap-1.5 border-b border-slate-100 pb-3">
-          <h2 className="text-base font-semibold text-slate-900">
-            Katalog części naprawczych i tuningowych
-          </h2>
-          <InfoTooltip text="Szablony części dodawanych jednym kliknięciem w warsztacie. Możesz wpisać domyślny sklep, link do sklepu, koszt zakupu i cenę dla klienta." />
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
+          <div className="flex items-center gap-1.5">
+            <h2 className="text-base font-semibold text-slate-900">
+              Magazyn i katalog części naprawczych
+            </h2>
+            <InfoTooltip text="Części w magazynie i szablony do szybkiego dodawania w karcie zlecenia. Wklej link do produktu ze sklepu, aby automatycznie pobrać nazwę, kategorię i cenę." />
+          </div>
+          <span className="font-mono text-xs text-slate-500 tabular-nums">
+            {partsCatalog.length} / 200 poz.
+          </span>
         </div>
+
+        {/* Add Part via Store URL Paste */}
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void handleImportPartFromUrl();
+          }}
+          className="mt-4 rounded-lg border border-stone-200 bg-stone-50/70 p-3 space-y-2"
+        >
+          <div className="flex items-center gap-1.5">
+            <Link2 className="h-3.5 w-3.5 text-[#b86d00]" />
+            <span className="text-xs font-semibold text-slate-800">
+              Dodaj część do magazynu przez wklejenie linku ze sklepu
+            </span>
+            <InfoTooltip text="Wklej link do produktu (np. Taiwangun, Gunfire, SpecShop, Azteko). System odczyta nazwę, sklep, kategorię oraz cenę zakupu i przeliczy cenę klienta z Twoim narzutem." />
+          </div>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <input
+              type="url"
+              value={partUrlInput}
+              onChange={(e) => {
+                setPartUrlInput(e.target.value);
+                if (urlImportError) setUrlImportError(null);
+              }}
+              onPaste={(e) => {
+                const pasted = (e.clipboardData.getData('text/plain') || '').trim();
+                if (/^https?:\/\//i.test(pasted) && !partUrlInput.trim()) {
+                  setPartUrlInput(pasted);
+                  e.preventDefault();
+                  void handleImportPartFromUrl(pasted);
+                }
+              }}
+              placeholder="Wklej link https://www.taiwangun.com/... lub inny adres produktu"
+              disabled={isImportingUrl}
+              className="flex-1 rounded-lg border border-stone-200 bg-white px-3 py-2 text-xs text-slate-900 placeholder:text-slate-400 focus:border-[#e88a00] focus:outline-none disabled:bg-slate-100"
+            />
+            <button
+              type="submit"
+              disabled={isImportingUrl || !partUrlInput.trim()}
+              className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-[#e88a00] px-4 py-2 text-xs font-semibold text-white hover:bg-[#cf7b00] disabled:opacity-50 whitespace-nowrap"
+            >
+              {isImportingUrl ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  Pobieram dane...
+                </>
+              ) : (
+                <>
+                  <Plus className="h-3.5 w-3.5" />
+                  Dodaj z linku
+                </>
+              )}
+            </button>
+          </div>
+          {urlImportError && (
+            <p className="text-xs font-medium text-red-600">{urlImportError}</p>
+          )}
+          {urlImportNotice && (
+            <p className="text-xs font-medium text-amber-800">{urlImportNotice}</p>
+          )}
+        </form>
 
         {/* Mobile Cards */}
         <div className="mt-4 space-y-3 md:hidden">
@@ -222,6 +374,9 @@ export const DatabaseView: React.FC<DatabaseViewProps> = ({
                         {s}
                       </option>
                     ))}
+                    {!supplierOptions.includes(part.supplier) && (
+                      <option value={part.supplier}>{part.supplier}</option>
+                    )}
                   </select>
                 </div>
                 <div>
@@ -264,16 +419,46 @@ export const DatabaseView: React.FC<DatabaseViewProps> = ({
                     className="mt-0.5 w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs tabular-nums focus:border-[#e88a00] focus:outline-none"
                   />
                 </div>
+                <div className="col-span-2">
+                  <label className="block text-[10px] font-medium text-slate-500">
+                    Stan (szt.)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={part.stockQty ?? 0}
+                    onChange={(e) =>
+                      handleUpdatePart(part.id, {
+                        stockQty: Math.max(0, parseInt(e.target.value, 10) || 0),
+                      })
+                    }
+                    className="mt-0.5 w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs tabular-nums focus:border-[#e88a00] focus:outline-none"
+                  />
+                </div>
               </div>
-              <input
-                type="text"
-                value={part.productUrl}
-                onChange={(e) =>
-                  handleUpdatePart(part.id, { productUrl: e.target.value })
-                }
-                placeholder="https://... link do sklepu"
-                className="w-full rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:border-[#e88a00] focus:outline-none"
-              />
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="text"
+                  value={part.productUrl}
+                  onChange={(e) =>
+                    handleUpdatePart(part.id, { productUrl: e.target.value })
+                  }
+                  placeholder="https://... link do sklepu"
+                  className="flex-1 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:border-[#e88a00] focus:outline-none"
+                />
+                {part.productUrl && (
+                  <a
+                    href={part.productUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="rounded-md border border-slate-200 bg-white p-1.5 text-[#b86d00] hover:bg-slate-50 shrink-0"
+                    title="Otwórz stronę produktu"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </a>
+                )}
+              </div>
             </div>
           ))}
         </div>
@@ -287,6 +472,7 @@ export const DatabaseView: React.FC<DatabaseViewProps> = ({
                 <th className="py-2 px-2 font-medium">Kategoria</th>
                 <th className="py-2 px-2 font-medium">Sklep / Dostawca</th>
                 <th className="py-2 px-2 font-medium">Link do oferty</th>
+                <th className="py-2 px-2 font-medium text-right">Stan (szt.)</th>
                 <th className="py-2 px-2 font-medium text-right">Zakup (zł)</th>
                 <th className="py-2 px-2 font-medium text-right">Klient (zł)</th>
                 <th className="py-2 px-2 font-medium text-right">Marża</th>
@@ -347,15 +533,43 @@ export const DatabaseView: React.FC<DatabaseViewProps> = ({
                       </select>
                     </td>
                     <td className="py-2 px-2">
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="text"
+                          value={part.productUrl}
+                          onChange={(e) =>
+                            handleUpdatePart(part.id, { productUrl: e.target.value })
+                          }
+                          placeholder="https://..."
+                          aria-label="Link do produktu"
+                          className="w-36 rounded-md border border-slate-200 px-2 py-1.5 text-xs text-slate-600 focus:border-[#e88a00] focus:outline-none"
+                        />
+                        {part.productUrl && (
+                          <a
+                            href={part.productUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="rounded-md border border-slate-200 bg-white p-1.5 text-[#b86d00] hover:bg-slate-50 shrink-0"
+                            title="Otwórz stronę produktu"
+                          >
+                            <ExternalLink className="h-3.5 w-3.5" />
+                          </a>
+                        )}
+                      </div>
+                    </td>
+                    <td className="py-2 px-2 text-right">
                       <input
-                        type="text"
-                        value={part.productUrl}
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={part.stockQty ?? 0}
                         onChange={(e) =>
-                          handleUpdatePart(part.id, { productUrl: e.target.value })
+                          handleUpdatePart(part.id, {
+                            stockQty: Math.max(0, parseInt(e.target.value, 10) || 0),
+                          })
                         }
-                        placeholder="https://..."
-                        aria-label="Link do produktu"
-                        className="w-40 rounded-md border border-slate-200 px-2 py-1.5 text-xs text-slate-600 focus:border-[#e88a00] focus:outline-none"
+                        aria-label="Stan magazynowy (szt.)"
+                        className="w-16 rounded-md border border-slate-200 px-2 py-1.5 text-right font-mono text-xs tabular-nums focus:border-[#e88a00] focus:outline-none"
                       />
                     </td>
                     <td className="py-2 px-2 text-right">
@@ -474,20 +688,26 @@ export const DatabaseView: React.FC<DatabaseViewProps> = ({
                   {s}
                 </option>
               ))}
+              {newPart.supplier && !supplierOptions.includes(newPart.supplier) && (
+                <option value={newPart.supplier}>{newPart.supplier}</option>
+              )}
             </select>
           </div>
-          <div className="col-span-2 sm:col-span-2">
+          <div className="col-span-2 sm:col-span-1">
             <label className="block text-[11px] font-medium text-slate-600">
-              Link (opcjonalnie)
+              Stan (szt.)
             </label>
             <input
-              type="text"
-              placeholder="https://..."
-              value={newPart.productUrl}
+              type="number"
+              min="0"
+              value={newPart.stockQty}
               onChange={(e) =>
-                setNewPart({ ...newPart, productUrl: e.target.value })
+                setNewPart({
+                  ...newPart,
+                  stockQty: Math.max(0, parseInt(e.target.value, 10) || 0),
+                })
               }
-              className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs text-slate-900 focus:border-[#e88a00] focus:outline-none"
+              className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-2 font-mono text-xs tabular-nums focus:border-[#e88a00] focus:outline-none"
             />
           </div>
           <div className="col-span-1 sm:col-span-1">
@@ -526,6 +746,20 @@ export const DatabaseView: React.FC<DatabaseViewProps> = ({
                 })
               }
               className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-2 font-mono text-xs tabular-nums focus:border-[#e88a00] focus:outline-none"
+            />
+          </div>
+          <div className="col-span-2 sm:col-span-1">
+            <label className="block text-[11px] font-medium text-slate-600">
+              Link
+            </label>
+            <input
+              type="text"
+              placeholder="https://..."
+              value={newPart.productUrl}
+              onChange={(e) =>
+                setNewPart({ ...newPart, productUrl: e.target.value })
+              }
+              className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-xs text-slate-900 focus:border-[#e88a00] focus:outline-none"
             />
           </div>
           <button

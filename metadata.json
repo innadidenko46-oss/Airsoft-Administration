@@ -1,7 +1,7 @@
 {
   "name": "Panel Administratora – AIRSOFT",
   "description": "Kompleksowe narzędzie do zarządzania projektami naprawy repliki, wyceny kosztów oraz śledzenia statusów realizacji.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": ["microphone"],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]
